@@ -94,6 +94,7 @@ def make_master_icon(size=1024):
 
 def make_all_sizes(master):
     """生成 7 个尺寸"""
+    from PIL import Image, ImageDraw
     sizes = [16, 32, 64, 128, 256, 512, 1024]
     out_dir = Path("icon_pngs")
     if out_dir.exists():
@@ -106,7 +107,6 @@ def make_all_sizes(master):
         # 添加圆角
         mask = Image.new('L', (sz, sz), 0)
         r = max(1, int(sz * 0.22))
-        ImageDraw = __import__('PIL.ImageDraw', fromlist=['ImageDraw']).ImageDraw
         ImageDraw.Draw(mask).rounded_rectangle(
             [(0, 0), (sz, sz)], radius=r, fill=255
         )
