@@ -1,5 +1,5 @@
 #!/bin/bash
-# AI 股票分析助手 - Mac 一键启动（完整版）
+# AI 股票分析助手 - Mac 一键启动（体验优化版）
 
 set -e
 cd "$(dirname "$0")"
@@ -8,6 +8,7 @@ cd "$(dirname "$0")"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 clear
@@ -38,6 +39,19 @@ fi
 PYTHON_VERSION=$(python3 --version | awk '{print $2}')
 echo -e "${GREEN}✓${NC} Python 版本: $PYTHON_VERSION"
 
+# 清理之前打包失败的残留
+if [ -d "build_venv" ]; then
+    echo -e "${BLUE}ℹ${NC} 清理之前的打包残留 (build_venv)..."
+    rm -rf build_venv build dist
+fi
+
+# 检查并清理 8501 端口
+if lsof -ti:8501 >/dev/null 2>&1; then
+    echo -e "${YELLOW}⚠${NC} 端口 8501 被占用，清理旧进程..."
+    lsof -ti:8501 | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
+
 # 创建虚拟环境（避免污染系统 Python）
 if [ ! -d "venv" ]; then
     echo -e "${YELLOW}[1/3]${NC} 首次运行，创建虚拟环境..."
@@ -67,9 +81,13 @@ echo "  关闭应用：按 Ctrl+C 或关闭此窗口"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
-# 延迟打开浏览器
-sleep 3
-open http://localhost:8501 2>/dev/null || true
+# 后台延迟 4 秒后自动打开浏览器（给 streamlit 启动留时间）
+(
+  sleep 4
+  URL="http://localhost:8501"
+  # 优先用默认浏览器，否则 Safari
+  open "$URL" 2>/dev/null || open -a Safari "$URL" 2>/dev/null || true
+) &
 
 # 启动 streamlit
 streamlit run app.py
