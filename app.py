@@ -132,67 +132,267 @@ def _mock_kline_data(code, days=30):
     return df
 
 
+def _get_realtime_sina(code):
+    """新浪财经实时行情（A股）"""
+    # 沪市加 sh，深市加 sz
+    if code.startswith(("6", "9")):
+        symbol = f"sh{code}"
+    else:
+        symbol = f"sz{code}"
+    url = f"https://hq.sinajs.cn/list={symbol}"
+    headers = {"Referer": "https://finance.sina.com.cn"}
+    r = requests.get(url, headers=headers, timeout=8)
+    text = r.text.strip()
+    # 格式: var hq_str_sh600000="兆易创新,150.000,149.500,...";
+    if '""' in text or not text:
+        return None
+    quote_part = text.split('"', 1)[1].split('"')[0]
+    fields = quote_part.split(',')
+    # 新浪字段: 名称,今开,昨收,最新价,最高,最低,买一,卖一,成交量,成交额,...
+    if len(fields) < 32:
+        return None
+    name = fields[0]
+    open_p = float(fields[1] or 0)
+    prev_close = float(fields[2] or 0)
+    current = float(fields[3] or 0)
+    high = float(fields[4] or 0)
+    low = float(fields[5] or 0)
+    volume = int(float(fields[8] or 0))  # 股
+    amount = float(fields[9] or 0)       # 元
+    change = current - prev_close
+    change_pct = (change / prev_close * 100) if prev_close else 0
+    return {
+        "代码": code,
+        "名称": name,
+        "最新价": current,
+        "涨跌额": round(change, 3),
+        "涨跌幅%": round(change_pct, 2),
+        "最高": high,
+        "最低": low,
+        "今开": open_p,
+        "昨收": prev_close,
+        "成交量": volume,
+        "成交额": amount,
+        "市盈率": 0,
+        "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+
+def _get_realtime_tx(code):
+    """腾讯财经实时行情（A股）"""
+    if code.startswith(("6", "9")):
+        symbol = f"sh{code}"
+    else:
+        symbol = f"sz{code}"
+    url = f"https://qt.gtimg.cn/q={symbol}"
+    r = requests.get(url, timeout=8)
+    text = r.text.strip()
+    # 格式: v_sh600000="1~兆易创新~600000~150.00~149.50~...~";
+    if '""' in text or '~' not in text:
+        return None
+    parts = text.split('"')[1].split('~')
+    if len(parts) < 35:
+        return None
+    name = parts[1]
+    current = float(parts[3] or 0)
+    prev_close = float(parts[4] or 0)
+    open_p = float(parts[5] or 0)
+    volume = int(float(parts[6] or 0))  # 手
+    amount = float(parts[37] or 0) if len(parts) > 37 else 0
+    high = float(parts[33] or 0)
+    low = float(parts[34] or 0)
+    change = current - prev_close
+    change_pct = (change / prev_close * 100) if prev_close else 0
+    return {
+        "代码": code,
+        "名称": name,
+        "最新价": current,
+        "涨跌额": round(change, 3),
+        "涨跌幅%": round(change_pct, 2),
+        "最高": high,
+        "最低": low,
+        "今开": open_p,
+        "昨收": prev_close,
+        "成交量": volume * 100,  # 手转股
+        "成交额": amount,
+        "市盈率": 0,
+        "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+
+def _get_realtime_eastmoney(code):
+    """东方财富实时行情（A股）"""
+    if code.startswith(("6", "9")):
+        secid = f"1.{code}"
+    else:
+        secid = f"0.{code}"
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {
+        "secid": secid,
+        "fields": "f43,f44,f45,f46,f47,f48,f58,f60,f169,f170,f171",
+        "invt": 2,
+        "fltt": 2
+    }
+    r = requests.get(url, params=params, timeout=8)
+    data = r.json().get("data", {})
+    if not data:
+        return None
+    return {
+        "代码": code,
+        "名称": data.get("f58", "N/A"),
+        "最新价": data.get("f43", 0) / 100,
+        "涨跌额": data.get("f169", 0) / 100,
+        "涨跌幅%": data.get("f170", 0) / 100,
+        "最高": data.get("f44", 0) / 100,
+        "最低": data.get("f45", 0) / 100,
+        "今开": data.get("f46", 0) / 100,
+        "昨收": data.get("f60", 0) / 100,
+        "成交量": data.get("f47", 0),
+        "成交额": data.get("f48", 0),
+        "市盈率": data.get("f171", 0) / 100,
+        "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+
 @st.cache_data(ttl=300)
 def get_stock_realtime(code, market="A股"):
-    """获取实时行情（优先 akshare，失败回退 mock）"""
-    if not AKSHARE_AVAILABLE or market != "A股":
+    """获取实时行情（多源 fallback：东方财富 → 新浪 → 腾讯）"""
+    if market != "A股":
         return _mock_realtime_data(code)
 
-    try:
-        df = ak.stock_zh_a_spot_em()
-        row = df[df['代码'] == code]
-        if row.empty:
-            return None
+    # 多个数据源依次尝试（新浪和腾讯稳定，东方财富常被封）
+    sources = [
+        ("新浪财经", _get_realtime_sina),
+        ("腾讯财经", _get_realtime_tx),
+        ("东方财富", _get_realtime_eastmoney),
+    ]
+    for source_name, source_func in sources:
+        try:
+            data = source_func(code)
+            if data and data.get("最新价", 0) > 0:
+                return data
+        except Exception as e:
+            continue
 
-        r = row.iloc[0]
-        return {
-            "代码": code,
-            "名称": str(r.get('名称', 'N/A')),
-            "最新价": float(r.get('最新价', 0)),
-            "涨跌额": float(r.get('涨跌额', 0)),
-            "涨跌幅%": float(r.get('涨跌幅', 0)),
-            "最高": float(r.get('最高', 0)),
-            "最低": float(r.get('最低', 0)),
-            "今开": float(r.get('今开', 0)),
-            "昨收": float(r.get('昨收', 0)),
-            "成交量": int(r.get('成交量', 0)),
-            "成交额": float(r.get('成交额', 0)),
-            "市盈率": float(r.get('市盈率-动态', 0)),
-            "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-    except Exception as e:
-        st.warning(f"akshare 获取失败，使用演示数据: {e}")
-        return _mock_realtime_data(code)
+    st.warning(f"所有数据源均失败（{code}），使用演示数据")
+    return _mock_realtime_data(code)
+
+
+def _get_kline_sina(code, days):
+    """新浪财经 K 线"""
+    if code.startswith(("6", "9")):
+        symbol = f"sh{code}"
+    else:
+        symbol = f"sz{code}"
+    # scale=240 日K, 1=不复权
+    url = f"https://quotes.money.163.com/service/chddata.html"
+    # 新浪接口比较复杂，用网易备用
+    # 改用腾讯
+    return None
+
+
+def _get_kline_tx(code, days):
+    """腾讯财经 K 线"""
+    if code.startswith(("6", "9")):
+        symbol = f"sh{code}"
+    else:
+        symbol = f"sz{code}"
+    # klt=101 日K, fqt=1 前复权
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    params = {
+        "param": f"{symbol},day,,,{days},qfq"
+    }
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
+    if data.get("code") != 0:
+        return None
+    klines = data.get("data", {}).get(symbol, {}).get("day") or \
+             data.get("data", {}).get(symbol, {}).get("qfqday")
+    if not klines:
+        return None
+    rows = []
+    for k in klines:
+        if len(k) < 6:
+            continue
+        rows.append({
+            "日期": k[0],
+            "开盘": float(k[1]),
+            "收盘": float(k[2]),
+            "最高": float(k[3]),
+            "最低": float(k[4]),
+            "成交量": int(float(k[5])),
+            "成交额": 0,
+            "振幅%": 0,
+            "涨跌幅%": 0,
+            "换手率%": 0
+        })
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def _get_kline_eastmoney(code, days):
+    """东方财富 K 线"""
+    if code.startswith(("6", "9")):
+        secid = f"1.{code}"
+    else:
+        secid = f"0.{code}"
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "klt": 101,
+        "fqt": 1,
+        "end": "20500101",
+        "lmt": days
+    }
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json().get("data", {})
+    klines = data.get("klines", [])
+    if not klines:
+        return None
+    rows = []
+    for k in klines:
+        parts = k.split(",")
+        if len(parts) < 11:
+            continue
+        rows.append({
+            "日期": parts[0],
+            "开盘": float(parts[1]),
+            "收盘": float(parts[2]),
+            "最高": float(parts[3]),
+            "最低": float(parts[4]),
+            "成交量": int(parts[5]),
+            "成交额": float(parts[6]),
+            "振幅%": float(parts[7]),
+            "涨跌幅%": float(parts[8]),
+            "换手率%": float(parts[10]) if len(parts) > 10 else 0
+        })
+    return pd.DataFrame(rows) if rows else None
 
 
 @st.cache_data(ttl=3600)
 def get_kline_data(code, days=30, market="A股"):
-    """获取 K 线数据"""
-    if not AKSHARE_AVAILABLE or market != "A股":
+    """获取 K 线数据（多源 fallback）"""
+    if market != "A股":
         return _mock_kline_data(code, days)
 
-    try:
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=days*2)).strftime("%Y%m%d")
-        df = ak.stock_zh_a_hist(
-            symbol=code, period="daily", adjust="qfq",
-            start_date=start_date, end_date=end_date
-        )
-        if df.empty:
-            return _mock_kline_data(code, days)
+    # 多个数据源依次尝试（腾讯 K 线稳定）
+    sources = [
+        ("腾讯财经", _get_kline_tx),
+        ("东方财富", _get_kline_eastmoney),
+    ]
+    for source_name, source_func in sources:
+        try:
+            df = source_func(code, days)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            continue
 
-        # 标准化列名
-        rename_map = {
-            "日期": "日期", "开盘": "开盘", "收盘": "收盘",
-            "最高": "最高", "最低": "最低", "成交量": "成交量",
-            "成交额": "成交额", "振幅": "振幅%", "涨跌幅": "涨跌幅%",
-            "换手率": "换手率%"
-        }
-        df = df.rename(columns=rename_map)
-        return df.tail(days).reset_index(drop=True)
-    except Exception as e:
-        st.warning(f"akshare K线获取失败，使用演示数据: {e}")
-        return _mock_kline_data(code, days)
+    st.warning(f"K线数据获取失败（{code}），使用演示数据")
+    return _mock_kline_data(code, days)
 
 
 def calc_technical_indicators(df):
