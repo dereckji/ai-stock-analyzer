@@ -24,36 +24,34 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-echo -e "${YELLOW}[1/4]${NC} 检查系统架构..."
+echo -e "${YELLOW}[1/5]${NC} 检查系统架构..."
 ARCH=$(uname -m)
-echo -e "${GREEN}✓${NC} 你的 Mac: $ARCH (Apple Silicon / Intel)"
+echo -e "${GREEN}✓${NC} 你的 Mac: $ARCH"
 
-# 创建虚拟环境
+# 创建打包虚拟环境
 if [ ! -d "build_venv" ]; then
-    echo -e "${YELLOW}[2/4]${NC} 创建打包环境..."
+    echo -e "${YELLOW}[2/5]${NC} 创建打包环境..."
     python3 -m venv build_venv
 fi
-
 source build_venv/bin/activate
 pip install --upgrade pip -q
 
 # 安装打包工具
-echo -e "${YELLOW}[3/4]${NC} 安装 py2app..."
+echo -e "${YELLOW}[3/5]${NC} 安装 py2app..."
 pip install py2app -q
 echo -e "${GREEN}✓${NC} py2app 已安装"
 
-# 执行打包
-echo -e "${YELLOW}[4/4]${NC} 开始打包（约 3-5 分钟）..."
-echo "    首次打包会下载较多依赖，请耐心等待..."
-
-# 创建 setup.py 用于 py2app
+# 创建 setup.py
+echo -e "${YELLOW}[4/5]${NC} 生成配置文件..."
 cat > setup.py << 'PYEOF'
 from setuptools import setup
 
 APP = ['app.py']
+DATA_FILES = []
+
 OPTIONS = {
     'argv_emulation': False,
-    'packages': ['streamlit', 'akshare', 'pandas', 'numpy', 'requests', 'altair', 'toolz'],
+    'packages': ['streamlit', 'pandas', 'numpy', 'requests', 'altair', 'toolz', 'plotly'],
     'iconfile': None,
     'plist': {
         'CFBundleName': 'AI股票分析',
@@ -63,21 +61,38 @@ OPTIONS = {
         'CFBundleShortVersionString': '1.0',
         'LSMinimumSystemVersion': '10.13',
         'NSHighResolutionCapable': True,
+        # 关键：让应用能找到当前目录的 app.py
+        'CFBundleExecutable': 'AI股票分析',
     },
-    'includes': ['streamlit.web.cli', 'streamlit.runtime.scriptrunner'],
-    'excludes': ['tkinter', 'matplotlib.tests', 'pytest'],
+    'includes': [
+        'streamlit.web.cli',
+        'streamlit.runtime.scriptrunner',
+        'streamlit.runtime.runtime',
+        'streamlit.components.v1.components',
+    ],
+    'excludes': [
+        'tkinter', 'matplotlib.tests', 'pytest',
+        'scipy', 'sympy', 'IPython', 'jupyter',
+        'transformers', 'torch', 'tensorflow',
+    ],
 }
 
 setup(
     app=APP,
     name='AI股票分析',
-    options={'app': OPTIONS},
+    data_files=DATA_FILES,
+    options={'py2app': OPTIONS},
     setup_requires=['py2app'],
-    install_requires=['streamlit', 'akshare', 'pandas', 'requests'],
 )
 PYEOF
+echo -e "${GREEN}✓${NC} setup.py 已生成"
 
-python setup.py py2app 2>&1 | tail -20
+# 执行打包
+echo -e "${YELLOW}[5/5]${NC} 开始打包（约 3-5 分钟）..."
+echo "    首次打包会下载较多依赖，请耐心等待..."
+echo ""
+
+python setup.py py2app 2>&1 | tail -30
 
 if [ -d "dist/AI股票分析.app" ]; then
     echo ""
@@ -85,10 +100,11 @@ if [ -d "dist/AI股票分析.app" ]; then
     echo -e "  ${GREEN}✅ 打包成功！${NC}"
     echo ""
     echo "  APP 位置: $(pwd)/dist/AI股票分析.app"
+    echo "  APP 大小: $(du -sh dist/AI股票分析.app | cut -f1)"
     echo ""
     echo "  使用方法："
     echo "  1. 打开 Finder 进入 dist 文件夹"
-    echo "  2. 把 AI股票分析.app 拖到:"
+    echo "  2. 把 AI股票分析.app 拖到："
     echo "     • 桌面"
     echo "     • 启动台 (Launchpad)"
     echo "     • 应用程序文件夹 (/Applications)"
@@ -102,6 +118,13 @@ if [ -d "dist/AI股票分析.app" ]; then
     open dist/
 else
     echo -e "${RED}❌ 打包失败，请查看上方日志${NC}"
+    echo ""
+    echo "常见问题："
+    echo "  1. 如果是 M1/M2 Mac 报错 arch 兼容："
+    echo "     在终端运行：arch -x86_64 zsh  再执行本脚本"
+    echo "  2. 如果是网络错误：开 VPN 后重试"
+    echo "  3. 如果是 py2app 安装失败："
+    echo "     brew install python-tk@3.14  # 或对应版本"
 fi
 
 echo ""
