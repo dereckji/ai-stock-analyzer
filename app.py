@@ -178,16 +178,25 @@ def _get_realtime_sina(code):
     }
 
 
-def _get_realtime_tx(code):
-    """腾讯财经实时行情（A股）"""
-    if code.startswith(("6", "9")):
-        symbol = f"sh{code}"
+def _get_realtime_tx(code, market="A股"):
+    """腾讯财经实时行情（支持 A股/港股/美股）"""
+    if market == "A股":
+        if code.startswith(("6", "9")):
+            symbol = f"sh{code}"
+        else:
+            symbol = f"sz{code}"
+    elif market == "港股":
+        # 港股代码去掉前导0，补齐5位
+        code_num = code.lstrip("0") or "0"
+        symbol = f"hk{code_num.zfill(5)}"
+    elif market == "美股":
+        symbol = f"us{code.upper()}"
     else:
-        symbol = f"sz{code}"
+        symbol = f"sh{code}"
+
     url = f"https://qt.gtimg.cn/q={symbol}"
     r = requests.get(url, timeout=8)
     text = r.text.strip()
-    # 格式: v_sh600000="1~兆易创新~600000~150.00~149.50~...~";
     if '""' in text or '~' not in text:
         return None
     parts = text.split('"')[1].split('~')
@@ -201,8 +210,16 @@ def _get_realtime_tx(code):
     amount = float(parts[37] or 0) if len(parts) > 37 else 0
     high = float(parts[33] or 0)
     low = float(parts[34] or 0)
-    change = current - prev_close
-    change_pct = (change / prev_close * 100) if prev_close else 0
+    # 港股美股涨跌额和涨跌幅在不同位置
+    if market == "A股":
+        change = current - prev_close
+        change_pct = (change / prev_close * 100) if prev_close else 0
+        volume_shares = volume * 100
+    else:
+        # 港股美股：parts[31]=涨跌额, parts[32]=涨跌幅
+        change = float(parts[31] or 0) if len(parts) > 31 else (current - prev_close)
+        change_pct = float(parts[32] or 0) if len(parts) > 32 else 0
+        volume_shares = volume  # 港股美股已经是股数
     return {
         "代码": code,
         "名称": name,
@@ -213,7 +230,7 @@ def _get_realtime_tx(code):
         "最低": low,
         "今开": open_p,
         "昨收": prev_close,
-        "成交量": volume * 100,  # 手转股
+        "成交量": volume_shares,
         "成交额": amount,
         "市盈率": 0,
         "更新时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -256,16 +273,20 @@ def _get_realtime_eastmoney(code):
 
 @st.cache_data(ttl=300)
 def get_stock_realtime(code, market="A股"):
-    """获取实时行情（多源 fallback：东方财富 → 新浪 → 腾讯）"""
-    if market != "A股":
-        return _mock_realtime_data(code)
+    """获取实时行情（多源 fallback）"""
+    # 多个数据源依次尝试
+    if market == "A股":
+        sources = [
+            ("新浪财经", _get_realtime_sina),
+            ("腾讯财经", lambda c: _get_realtime_tx(c, "A股")),
+            ("东方财富", _get_realtime_eastmoney),
+        ]
+    else:
+        # 港股美股用腾讯接口（最稳定）
+        sources = [
+            ("腾讯财经", lambda c: _get_realtime_tx(c, market)),
+        ]
 
-    # 多个数据源依次尝试（新浪和腾讯稳定，东方财富常被封）
-    sources = [
-        ("新浪财经", _get_realtime_sina),
-        ("腾讯财经", _get_realtime_tx),
-        ("东方财富", _get_realtime_eastmoney),
-    ]
     for source_name, source_func in sources:
         try:
             data = source_func(code)
@@ -274,7 +295,7 @@ def get_stock_realtime(code, market="A股"):
         except Exception as e:
             continue
 
-    st.warning(f"所有数据源均失败（{code}），使用演示数据")
+    st.warning(f"所有数据源均失败（{market} {code}），使用演示数据")
     return _mock_realtime_data(code)
 
 
@@ -291,13 +312,21 @@ def _get_kline_sina(code, days):
     return None
 
 
-def _get_kline_tx(code, days):
-    """腾讯财经 K 线"""
-    if code.startswith(("6", "9")):
-        symbol = f"sh{code}"
+def _get_kline_tx(code, days, market="A股"):
+    """腾讯财经 K 线（支持 A股/港股/美股）"""
+    if market == "A股":
+        if code.startswith(("6", "9")):
+            symbol = f"sh{code}"
+        else:
+            symbol = f"sz{code}"
+    elif market == "港股":
+        code_num = code.lstrip("0") or "0"
+        symbol = f"hk{code_num.zfill(5)}"
+    elif market == "美股":
+        symbol = f"us{code.upper()}"
     else:
-        symbol = f"sz{code}"
-    # klt=101 日K, fqt=1 前复权
+        symbol = f"sh{code}"
+
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {
         "param": f"{symbol},day,,,{days},qfq"
@@ -375,14 +404,18 @@ def _get_kline_eastmoney(code, days):
 @st.cache_data(ttl=3600)
 def get_kline_data(code, days=30, market="A股"):
     """获取 K 线数据（多源 fallback）"""
-    if market != "A股":
-        return _mock_kline_data(code, days)
+    # 多个数据源依次尝试
+    if market == "A股":
+        sources = [
+            ("腾讯财经", lambda c, d: _get_kline_tx(c, d, "A股")),
+            ("东方财富", _get_kline_eastmoney),
+        ]
+    else:
+        # 港股美股只用腾讯 K 线
+        sources = [
+            ("腾讯财经", lambda c, d: _get_kline_tx(c, d, market)),
+        ]
 
-    # 多个数据源依次尝试（腾讯 K 线稳定）
-    sources = [
-        ("腾讯财经", _get_kline_tx),
-        ("东方财富", _get_kline_eastmoney),
-    ]
     for source_name, source_func in sources:
         try:
             df = source_func(code, days)
@@ -391,7 +424,7 @@ def get_kline_data(code, days=30, market="A股"):
         except Exception:
             continue
 
-    st.warning(f"K线数据获取失败（{code}），使用演示数据")
+    st.warning(f"K线数据获取失败（{market} {code}），使用演示数据")
     return _mock_kline_data(code, days)
 
 
